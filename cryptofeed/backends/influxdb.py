@@ -6,17 +6,19 @@ associated with this software.
 '''
 from decimal import Decimal
 import logging
-import aiohttp
+import requests
 
 from cryptofeed.defines import BID, ASK
-from cryptofeed.backends._util import book_convert
+from cryptofeed.backends._util import book_convert, book_delta_convert
+from cryptofeed.backends.http import HTTPCallback
+from cryptofeed.exceptions import UnsupportedType
 
 
 LOG = logging.getLogger('feedhandler')
 
 
-class InfluxCallback:
-    def __init__(self, addr: str, db: str, **kwargs):
+class InfluxCallback(HTTPCallback):
+    def __init__(self, addr: str, db: str, create_db=True, numeric_type=str, **kwargs):
         """
         Parent class for InfluxDB callbacks
 
@@ -24,20 +26,19 @@ class InfluxCallback:
         ---------------
         MEASUREMENT | TAGS | FIELDS
 
-        Measurement: Exchange Name
-        TAGS: trading pair, feed type (book, trades, etc), side (if applicable), order id (if applicable)
+        Measurement: Data Feed-Exxhange (configurable)
+        TAGS: pair
         FIELDS: timestamp, amount, price, other funding specific fields
 
         Example data in InfluxDB
         ------------------------
-        > select * from COINBASE;
+        > select * from COINBASE-book;
         name: COINBASE
-        time                amount     feed   id       pair    price   side timestamp
-        ----                ------     ----   --       ----    -----   ---- ---------
-        1542577584823213000 0.00485207 trades 53989471 BTC-USD 5539    ask  2018-11-18T21:46:23.184000Z
-        1542577584985404000 0.0018     book            BTC-USD 5536.17 bid  2018-11-18T21:46:24.963762Z
-        1542577584985404000 0.0015     book            BTC-USD 5542    ask  2018-11-18T21:46:24.963762Z
-        1542577585259616000 0.0018     book            BTC-USD 5536.17 bid  2018-11-18T21:46:25.256391Z
+        time                amount    pair    price   side timestamp
+        ----                ------    ----    -----   ---- ---------
+        1542577584985404000 0.0018    BTC-USD 5536.17 bid  2018-11-18T21:46:24.963762Z
+        1542577584985404000 0.0015    BTC-USD 5542    ask  2018-11-18T21:46:24.963762Z
+        1542577585259616000 0.0018    BTC-USD 5536.17 bid  2018-11-18T21:46:25.256391Z
 
         Parameters
         ----------
@@ -46,63 +47,95 @@ class InfluxCallback:
           http(s)://<ip addr>:port
         db: str
           Database to write to
+        numeric_type: str/float
+          Convert types before writing (amount and price)
         """
+        super().__init__(addr, **kwargs)
         self.addr = f"{addr}/write?db={db}"
         self.session = None
+        self.numeric_type = numeric_type
 
-    async def write(self, data):
-        if not self.session or self.session.closed:
-            self.session = aiohttp.ClientSession()
-
-        async with self.session.post(self.addr, data=data) as resp:
-            if resp.status != 204:
-                error = await resp.text()
-                LOG.error("Write to influxDB failed: %d - %s", resp.status, error)
-
+        if create_db:
+            r = requests.post(f'{addr}/query', data={'q': f'CREATE DATABASE {db}'})
+            r.raise_for_status()
 
 class TradeInflux(InfluxCallback):
+    def __init__(self, *args, key='trades', **kwargs):
+        super().__init__(*args, **kwargs)
+        self.key = key
+
     async def __call__(self, *, feed: str, pair: str, side: str, amount: Decimal, price: Decimal, order_id=None, timestamp=None):
-        amount = float(amount)
-        price = float(price)
-        trade = f'{feed},pair={pair},feed=trades,side={side}'
-        if order_id:
-            trade += f',id={order_id}'
-        trade += f' amount={amount},price={price}'
+        amount = str(amount)
+        price = str(price)
 
-        if timestamp:
-            trade += f',timestamp="{timestamp}"'
+        if order_id is None:
+            order_id = 'None'
+        if self.numeric_type is str:
+            trade = f'{self.key}-{feed},pair={pair} side="{side}",id="{order_id}",amount="{amount}",price="{price}",timestamp={timestamp}'
+        elif self.numeric_type is float:
+            trade = f'{self.key}-{feed},pair={pair} side="{side}",id="{order_id}",amount={amount},price={price},timestamp={timestamp}'
+        else:
+            raise UnsupportedType(f"Type {self.numeric_type} not supported")
 
-        await self.write(trade)
+        await self.write('POST', trade)
 
 
 class FundingInflux(InfluxCallback):
-    async def __call__(self, *, feed, pair, **kwargs):
-        tags = ('side', 'order_id')
+    def __init__(self, *args, key='funding', **kwargs):
+        super().__init__(*args, **kwargs)
+        self.key = key
 
-        data = f"{feed},pair={pair},feed=funding"
-        for check in tags:
-            if check in kwargs:
-                data += f',{check}={kwargs[check]}'
-        data += ' '
+    async def __call__(self, *, feed, pair, **kwargs):
+        data = f"{self.key}-{feed},pair={pair} "
 
         for key, val in kwargs.items():
-            if key in tags:
+            if key in {'feed', 'pair'}:
                 continue
-            if isinstance(val, Decimal):
-                val = float(val)
+            if isinstance(val, (Decimal, float)):
+                val = str(val)
+                if self.numeric_type is str:
+                    val = f'"{val}"'
+                elif self.numeric_type is not float:
+                    raise UnsupportedType(f"Type {self.numeric_type} not supported")
             elif isinstance(val, str):
-                val = f'"{kwargs[key]}"'
+                val = f'"{val}"'
             data += f"{key}={val},"
 
         data = data[:-1]
+        await self.write('POST', data)
 
-        await self.write(data)
+
+class InfluxBookCallback(InfluxCallback):
+    async def _write_rows(self, start, data, timestamp):
+        msg = []
+        ts = int(timestamp * 1000000000)
+        for side in (BID, ASK):
+            for price, val in data[side].items():
+                if isinstance(val, dict):
+                    for order_id, amount in val.items():
+                        if self.numeric_type is str:
+                            msg.append(f'{start} side="{side}",id="{order_id}",timestamp={timestamp},price="{price}",amount="{amount}" {ts}')
+                        elif self.numeric_type is float:
+                            msg.append(f'{start} side="{side}",id="{order_id}",timestamp={timestamp},price={price},amount={amount} {ts}')
+                        else:
+                            raise UnsupportedType(f"Type {self.numeric_type} not supported")
+                        ts += 1
+                else:
+                    if self.numeric_type is str:
+                        msg.append(f'{start} side="{side}",timestamp={timestamp},price="{price}",amount="{val}" {ts}')
+                    elif self.numeric_type is float:
+                        msg.append(f'{start} side="{side}",timestamp={timestamp},price={price},amount={val} {ts}')
+                    else:
+                        raise UnsupportedType(f"Type {self.numeric_type} not supported")
+                    ts += 1
+        await self.write('POST', '\n'.join(msg))
 
 
-class BookInflux(InfluxCallback):
-    def __init__(self, *args, **kwargs):
+class BookInflux(InfluxBookCallback):
+    def __init__(self, *args, key='book', depth=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.depth = kwargs.get('depth', None)
+        self.depth = depth
+        self.key = key
         self.previous = {BID: {}, ASK: {}}
 
     async def __call__(self, *, feed, pair, book, timestamp):
@@ -115,15 +148,17 @@ class BookInflux(InfluxCallback):
             self.previous[ASK] = data[ASK]
             self.previous[BID] = data[BID]
 
-        start = f"{feed},pair={pair},feed=book,"
-        body = ""
+        start = f"{self.key}-{feed},pair={pair},delta=False"
+        await self._write_rows(start, data, timestamp)
 
-        for side in (BID, ASK):
-            for price, val in data[side].items():
-                if isinstance(val, dict):
-                    for order_id, amount in val.items():
-                        body += start + f'side={side},id={order_id} timestamp="{timestamp}",price={price},amount={amount}\n'
-                else:
-                    body += start + f'side={side} timestamp="{timestamp}",price={price},amount={val}\n'
 
-        await self.write(body)
+class BookDeltaInflux(InfluxBookCallback):
+    def __init__(self, *args, key='book', **kwargs):
+        super().__init__(*args, **kwargs)
+        self.key = key
+
+    async def __call__(self, *, feed, pair, delta, timestamp):
+        start = f"{self.key}-{feed},pair={pair},delta=True"
+        data = {BID: {}, ASK: {}}
+        book_delta_convert(delta, data)
+        await self._write_rows(start, data, timestamp)

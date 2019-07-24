@@ -13,7 +13,7 @@ from sortedcontainers import SortedDict as sd
 
 from cryptofeed.feed import Feed
 from cryptofeed.defines import HUOBI, BUY, SELL, TRADES, BID, ASK, L2_BOOK
-from cryptofeed.standards import pair_exchange_to_std
+from cryptofeed.standards import pair_exchange_to_std, timestamp_normalize
 
 
 LOG = logging.getLogger('feedhandler')
@@ -22,8 +22,8 @@ LOG = logging.getLogger('feedhandler')
 class Huobi(Feed):
     id = HUOBI
 
-    def __init__(self, pairs=None, channels=None, callbacks=None, **kwargs):
-        super().__init__('wss://api.huobi.pro/hbus/ws', pairs=pairs, channels=channels, callbacks=callbacks, **kwargs)
+    def __init__(self, pairs=None, channels=None, callbacks=None, config=None, **kwargs):
+        super().__init__('wss://api.huobi.pro/ws', pairs=pairs, channels=channels, config=config, callbacks=callbacks, **kwargs)
         self.__reset()
 
     def __reset(self):
@@ -32,6 +32,7 @@ class Huobi(Feed):
     async def _book(self, msg):
         pair = pair_exchange_to_std(msg['ch'].split('.')[1])
         data = msg['tick']
+
         self.l2_book[pair] = {
             BID: sd({
                 Decimal(price): Decimal(amount)
@@ -43,7 +44,7 @@ class Huobi(Feed):
             })
         }
 
-        await self.book_callback(pair, L2_BOOK, False, False, msg['ts'])
+        await self.book_callback(pair, L2_BOOK, False, False, timestamp_normalize(self.id, msg['ts']))
 
     async def _trade(self, msg):
         """
@@ -56,17 +57,17 @@ class Huobi(Feed):
                 'data': [{'id': '10006534098224147003732', 'amount': Decimal('0.0777'), 'price': Decimal('3669.69'), 'direction': 'buy', 'ts': 1549757127140}]}}
         """
         for trade in msg['tick']['data']:
-            await self.callbacks[TRADES](
+            await self.callback(TRADES,
                 feed=self.id,
                 pair=pair_exchange_to_std(msg['ch'].split('.')[1]),
                 order_id=trade['id'],
                 side=BUY if trade['direction'] == 'buy' else SELL,
                 amount=Decimal(trade['amount']),
                 price=Decimal(trade['price']),
-                timestamp=trade['ts']
+                timestamp=timestamp_normalize(self.id, trade['ts'])
             )
 
-    async def message_handler(self, msg):
+    async def message_handler(self, msg: str, timestamp: float):
         # unzip message
         msg = zlib.decompress(msg, 16+zlib.MAX_WBITS)
         msg = json.loads(msg, parse_float=Decimal)
@@ -99,4 +100,3 @@ class Huobi(Feed):
                         "id": client_id
                     }
                 ))
-

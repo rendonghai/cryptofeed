@@ -12,3 +12,19 @@ class MissingSequenceNumber(Exception):
 
 class MissingMessage(Exception):
     pass
+
+
+class UnsupportedTradingPair(Exception):
+    pass
+
+
+class UnsupportedDataFeed(Exception):
+    pass
+
+
+class UnsupportedTradingOption(Exception):
+    pass
+
+
+class UnsupportedType(Exception):
+    pass

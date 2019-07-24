@@ -8,13 +8,14 @@ import asyncio
 import json
 import logging
 from decimal import Decimal
-from datetime import datetime as dt
+import time
 
 import requests
 from sortedcontainers import SortedDict as sd
 
 from cryptofeed.feed import Feed
 from cryptofeed.defines import L2_BOOK, L3_BOOK, BUY, SELL, BID, ASK, TRADES, TICKER, COINBASE
+from cryptofeed.standards import timestamp_normalize
 
 
 LOG = logging.getLogger('feedhandler')
@@ -67,7 +68,7 @@ class Coinbase(Feed):
             'last_size': '0.00241692'
         }
         '''
-        await self.callbacks[TICKER](feed=self.id,
+        await self.callback(TICKER, feed=self.id,
                                      pair=msg['product_id'],
                                      bid=Decimal(msg['best_bid']),
                                      ask=Decimal(msg['best_ask']))
@@ -95,7 +96,7 @@ class Coinbase(Feed):
             side = ASK if msg['side'] == 'sell' else BID
             size = Decimal(msg['size'])
             maker_order_id = msg['maker_order_id']
-            timestamp = msg['time']
+            timestamp = timestamp_normalize(self.id, msg['time'])
 
             _, new_size = self.order_map[maker_order_id]
             new_size -= size
@@ -112,19 +113,18 @@ class Coinbase(Feed):
 
             await self.book_callback(pair, L3_BOOK, False, delta, timestamp)
 
-        await self.callbacks[TRADES](
+        await self.callback(TRADES,
             feed=self.id,
             pair=msg['product_id'],
             order_id=msg['trade_id'],
             side=SELL if msg['side'] == 'buy' else BUY,
             amount=Decimal(msg['size']),
             price=Decimal(msg['price']),
-            timestamp=msg['time']
+            timestamp=timestamp_normalize(self.id, msg['time'])
+
         )
 
-    async def _pair_level2_snapshot(self, msg):
-        timestamp = dt.utcnow()
-        timestamp = timestamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    async def _pair_level2_snapshot(self, msg: dict, timestamp: float):
         self.l2_book[msg['product_id']] = {
             BID: sd({
                 Decimal(price): Decimal(amount)
@@ -138,9 +138,7 @@ class Coinbase(Feed):
 
         await self.book_callback(msg['product_id'], L2_BOOK, True, None, timestamp)
 
-    async def _pair_level2_update(self, msg):
-        timestamp = dt.utcnow()
-        timestamp = timestamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    async def _pair_level2_update(self, msg: dict, timestamp: float):
         delta = {BID: [], ASK: []}
         for side, price, amount in msg['changes']:
             side = BID if side == 'buy' else ASK
@@ -157,7 +155,7 @@ class Coinbase(Feed):
 
         await self.book_callback(msg['product_id'], L2_BOOK, False, delta, timestamp)
 
-    async def _book_snapshot(self, pairs):
+    async def _book_snapshot(self, pairs: list):
         self.__reset()
         # Coinbase needs some time to send messages to us
         # before we request the snapshot. If we don't sleep
@@ -173,6 +171,7 @@ class Coinbase(Feed):
             ret = requests.get(url)
             results.append(ret)
 
+        timestamp = time.time()
         for res, pair in zip(results, pairs):
             orders = res.json()
             self.l3_book[pair] = {BID: sd(), ASK: sd()}
@@ -186,9 +185,7 @@ class Coinbase(Feed):
                     else:
                         self.l3_book[pair][side][price] = {order_id: size}
                     self.order_map[order_id] = (price, size)
-            timestamp = dt.utcnow()
-            timestamp = timestamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            await self.callbacks[L3_BOOK](feed=self.id, pair=pair, book=self.l3_book[pair], timestamp=timestamp)
+            await self.callback(L3_BOOK, feed=self.id, pair=pair, book=self.l3_book[pair], timestamp=timestamp)
 
     async def _open(self, msg):
         delta = {BID: [], ASK: []}
@@ -197,7 +194,7 @@ class Coinbase(Feed):
         size = Decimal(msg['remaining_size'])
         pair = msg['product_id']
         order_id = msg['order_id']
-        timestamp = msg['time']
+        timestamp = timestamp_normalize(self.id, msg['time'])
 
         if price in self.l3_book[pair][side]:
             self.l3_book[pair][side][price][order_id] = size
@@ -229,7 +226,7 @@ class Coinbase(Feed):
         price = Decimal(msg['price'])
         side = ASK if msg['side'] == 'sell' else BID
         pair = msg['product_id']
-        timestamp = msg['time']
+        timestamp = timestamp_normalize(self.id, msg['time'])
 
         del self.l3_book[pair][side][price][order_id]
         if len(self.l3_book[pair][side][price]) == 0:
@@ -244,7 +241,7 @@ class Coinbase(Feed):
 
         if 'price' not in msg or not msg['price']:
             return
-        timestamp = msg['time']
+        timestamp = timestamp_normalize(self.id, msg['time'])
         order_id = msg['order_id']
         price = Decimal(msg['price'])
         side = ASK if msg['side'] == 'sell' else BID
@@ -258,7 +255,7 @@ class Coinbase(Feed):
 
         await self.book_callback(pair, L3_BOOK, False, delta, timestamp)
 
-    async def message_handler(self, msg):
+    async def message_handler(self, msg: str, timestamp: float):
         msg = json.loads(msg, parse_float=Decimal)
 
         if 'product_id' in msg and 'sequence' in msg and ('full' in self.channels or ('full' in self.config and msg['product_id'] in self.config['full'])):
@@ -279,9 +276,9 @@ class Coinbase(Feed):
             elif msg['type'] == 'match' or msg['type'] == 'last_match':
                 await self._book_update(msg)
             elif msg['type'] == 'snapshot':
-                await self._pair_level2_snapshot(msg)
+                await self._pair_level2_snapshot(msg, timestamp)
             elif msg['type'] == 'l2update':
-                await self._pair_level2_update(msg)
+                await self._pair_level2_update(msg, timestamp)
             elif msg['type'] == 'open':
                 await self._open(msg)
             elif msg['type'] == 'done':

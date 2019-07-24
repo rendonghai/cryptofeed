@@ -1,11 +1,64 @@
 ## Changelog
 
-### 0.21.0
+### 1.0.0
+  * Bugfix #113: Fix remaining exchanges who are not reporting timestamps correctly
+  * Feature: Generated timestamps now based on message receipt by feedhandler
+  * Feature: Multi-callback support
+  * Feature: Rework ZMQ using pub/sub with topics
+
+### 0.25.0 (2019-07-06)
+  * Feature: Rest Endpoints for Historical Deribit data
+  * Feature: Specify numeric datatype for InfluxDB
+  * Bugfix: Greatly improve performance of book writes for InfluxDB
+  * Feature: Bybit exchange support
+  * Bugfix: Deribit now returning floats in decimal.Decimal
+  * Feature: Elastic Search backend
+
+### 0.24.0 (2019-06-19)
+  * Bugfix: Book Delta Conversion issue in backends
+  * Bugfix: Tweak BitMEX rest api to handle more errors more gracefully
+  * Feature: Deribit Exchange support
+  * Feature: Instrument channel
+  * Bugfix: support Kraken websocket API changes
+  * Bugfix: correct USDT symbol mappings for Bitfinex
+  * Bugfix: Fixed mongo book backend
+  * Feature: Book delta support for mongo, sockets, ZMQ
+
+### 0.23.0 (2019-06-03)
+  * Feature: Book delta support for InfluxDB
+  * Feature: Swaps on OkEX
+
+### 0.22.2 (2019-05-23)
+  * Bugfix: Fix tagging issue in InfluxDB
+  * Bugfix: Fix book updates in InfluxDB
+  * Feature: Book delta support in Redis backends
+  * Feature: Book delta support in Kafka backend
+
+### 0.22.1 (2019-05-19)
+  * Feature: Cleanup callback code
+  * Feature: Poloniex subscription now behaves like other exchanges
+  * Feature: Kafka Backend
+
+### 0.22.0 (2019-05-04)
+  * Bugfix: Timestamp normalization for backends were losing subsecond fidelity
+  * Feature: All exchanges report timestamps in floating point unix time
+  * Bugfix: Implement change in OkEx's trading pair endpoint for pair generation
+
+### 0.21.1 (2019-04-28)
+  * Feature: Config support for Coinbene, Binance, EXX, BitMEX, Bitfinex, Bitstamp, HitBTC
+  * Feature: Complete clean up of public REST endpoints
+  * Feature: Improved book delta example
+  * Feature: Bitstamp Websocket V2 - L3 books now supported
+  * Bugfix: Incorrect book building in Kraken
+
+### 0.21.0 (2019-04-07)
   * Bugfix: Coinbase L3 Book would get in cycle of reconnecting due to missing sequence numbers
   * Feature: Kraken L2 Book Deltas
   * Feature: Book deltas streamlined and retain ordering
   * Feature: OKCoin exchange support
   * Feature: OKEx exchange support
+  * Feature: Coinbene exchange support
+  * Feature: Support Huobi Global and Huobi USA
 
 ### 0.20.2 (2019-03-19)
   * Bugfix: Kraken REST api using wrong symbol for trades

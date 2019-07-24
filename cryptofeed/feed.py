@@ -6,7 +6,7 @@ associated with this software.
 '''
 from cryptofeed.callback import Callback
 from cryptofeed.standards import pair_std_to_exchange, feed_to_exchange, load_exchange_pair_mapping
-from cryptofeed.defines import TRADES, TICKER, L2_BOOK, L3_BOOK, VOLUME, FUNDING, BOOK_DELTA, BITFINEX
+from cryptofeed.defines import TRADES, TICKER, L2_BOOK, L3_BOOK, VOLUME, FUNDING, BOOK_DELTA, INSTRUMENT
 
 
 class Feed:
@@ -20,12 +20,7 @@ class Feed:
         self.do_deltas = False
         self.pairs = []
         self.channels = []
-        print("Loading " + self.id)
         load_exchange_pair_mapping(self.id)
-
-        if channels is not None and FUNDING in channels and self.id == BITFINEX:
-            if len(channels) > 1:
-                raise ValueError("Funding channel must be in a separate feedhanlder on Bitfinex or you must use config")
 
         if config is not None and (pairs is not None or channels is not None):
             raise ValueError("Use config, or channels and pairs, not both")
@@ -47,7 +42,8 @@ class Feed:
                           L2_BOOK: Callback(None),
                           L3_BOOK: Callback(None),
                           VOLUME: Callback(None),
-                          FUNDING: Callback(None)}
+                          FUNDING: Callback(None),
+                          INSTRUMENT: Callback(None)}
 
         if callbacks:
             for cb_type, cb_func in callbacks.items():
@@ -55,19 +51,27 @@ class Feed:
                 if cb_type == BOOK_DELTA:
                     self.do_deltas = True
 
+        for key, callback in self.callbacks.items():
+            if not isinstance(callback, list):
+                self.callbacks[key] = [callback]
+
     async def book_callback(self, pair, book_type, forced, delta, timestamp):
         if self.do_deltas and self.updates < self.book_update_interval and not forced:
             self.updates += 1
-            await self.callbacks[BOOK_DELTA](feed=self.id, pair=pair, delta=delta, timestamp=timestamp)
+            await self.callback(BOOK_DELTA, feed=self.id, pair=pair, delta=delta, timestamp=timestamp)
 
         if self.updates >= self.book_update_interval or forced or not self.do_deltas:
             self.updates = 0
             if book_type == L2_BOOK:
-                await self.callbacks[L2_BOOK](feed=self.id, pair=pair, book=self.l2_book[pair], timestamp=timestamp)
+                await self.callback(L2_BOOK, feed=self.id, pair=pair, book=self.l2_book[pair], timestamp=timestamp)
             else:
-                await self.callbacks[L3_BOOK](feed=self.id, pair=pair, book=self.l3_book[pair], timestamp=timestamp)
+                await self.callback(L3_BOOK, feed=self.id, pair=pair, book=self.l3_book[pair], timestamp=timestamp)
 
-    async def message_handler(self, msg):
+    async def callback(self, data_type, **kwargs):
+        for cb in self.callbacks[data_type]:
+            await cb(**kwargs)
+
+    async def message_handler(self, msg: str, timestamp: float):
         raise NotImplementedError
 
 

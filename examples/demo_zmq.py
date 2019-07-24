@@ -8,9 +8,9 @@ from multiprocessing import Process
 
 from cryptofeed.backends.zmq import BookZMQ, TradeZMQ
 from cryptofeed import FeedHandler
-from cryptofeed.exchanges import Coinbase
+from cryptofeed.exchanges import Kraken
 
-from cryptofeed.defines import L3_BOOK, TRADES
+from cryptofeed.defines import L2_BOOK, TRADES
 
 
 def receiver(port):
@@ -18,29 +18,27 @@ def receiver(port):
     import time
     addr = 'tcp://127.0.0.1:{}'.format(port)
     ctx = zmq.Context.instance()
-    s = ctx.socket(zmq.PULL)
-    s.connect(addr)
-    while True:
-        data = s.recv_json()
-        print(data)
-        time.sleep(0.5)
+    s = ctx.socket(zmq.SUB)
+    s.setsockopt(zmq.SUBSCRIBE, b'')
 
+    s.bind(addr)
+    while True:
+        data = s.recv_string()
+        print(data)
 
 def main():
     try:
-        p = Process(target=receiver, args=(5555,))
-        p2 = Process(target=receiver, args=(5556,))
+        p = Process(target=receiver, args=(5678,))
 
         p.start()
-        p2.start()
 
         f = FeedHandler()
-        f.add_feed(Coinbase(channels=[L3_BOOK, TRADES], pairs=['BTC-USD'], callbacks={TRADES: TradeZMQ(), L3_BOOK: BookZMQ(depth=1, port=5556)}))
+        f.add_feed(Kraken(channels=[L2_BOOK], pairs=['ETH-USD'], callbacks={L2_BOOK: BookZMQ(depth=1, port=5678)}))
 
         f.run()
+
     finally:
         p.terminate()
-        p2.terminate()
 
 
 if __name__ == '__main__':

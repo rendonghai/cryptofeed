@@ -20,8 +20,12 @@ KRAKEN = 'KRAKEN'
 BINANCE = 'BINANCE'
 EXX = 'EXX'
 HUOBI = 'HUOBI'
+HUOBI_US = 'HUOBI_US'
 OKCOIN = 'OKCOIN'
 OKEX = 'OKEX'
+COINBENE = 'COINBENE'
+DERIBIT = 'DERIBIT'
+BYBIT = 'BYBIT'
 
 L2_BOOK = 'l2_book'
 L3_BOOK = 'l3_book'
@@ -30,7 +34,12 @@ TRADES = 'trades'
 TICKER = 'ticker'
 VOLUME = 'volume'
 FUNDING = 'funding'
+INSTRUMENT = 'instrument'
 UNSUPPORTED = 'unsupported'
+
+L2_BOOK_SWAP = 'l2_book_swap'
+TRADES_SWAP = 'trades_swap'
+TICKER_SWAP = 'ticker_swap'
 
 BUY = 'buy'
 SELL = 'sell'
@@ -38,6 +47,19 @@ SELL = 'sell'
 BID = 'bid'
 ASK = 'ask'
 UND = 'undefined'
+
+LIMIT = 'limit'
+MARKET = 'market'
+MAKER_OR_CANCEL = 'maker-or-cancel'
+FILL_OR_KILL = 'fill-or-kill'
+IMMEDIATE_OR_CANCEL = 'immediate-or-cancel'
+
+OPEN = 'open'
+PENDING = 'pending'
+FILLED = 'filled'
+PARTIAL = 'partial'
+CANCELLED = 'cancelled'
+
 
 """
 L2 Orderbook Layout
@@ -118,4 +140,57 @@ for L3 books:
     For L2 books a size of 0 means the price level should be deleted.
     For L3 books, a size of 0 means the order should be deleted. If there are
     no orders at the price, the price level can be deleted.
+
+
+
+Trading Responses
+
+Balances:
+
+{
+    coin/fiat: {
+        total: Decimal, # total amount
+        available: Decimal # available for trading
+    },
+    ...
+}
+
+
+Orders:
+
+[
+    {
+        order_id: str,
+        symbol: str,
+        side: str,
+        order_type: limit/market/etc,
+        price: Decimal,
+        total: Decimal,
+        executed: Decimal,
+        pending: Decimal,
+        timestamp: float,
+        order_status: FILLED/PARTIAL/CANCELLED/OPEN
+    },
+    {...},
+    ...
+
+]
+
+
+Trade history:
+[{
+    'price': Decimal,
+    'amount': Decimal,
+    'timestamp': float,
+    'side': str
+    'fee_currency': str,
+    'fee_amount': Decimal,
+    'trade_id': str,
+    'order_id': str
+    },
+    {
+        ...
+    }
+]
+
 """

@@ -7,7 +7,6 @@ associated with this software.
 import json
 import logging
 from decimal import Decimal
-import time
 
 from sortedcontainers import SortedDict as sd
 
@@ -62,7 +61,7 @@ class Kraken(Feed):
         """
         for trade in msg[1]:
             price, amount, timestamp, side, _, _ = trade
-            await self.callbacks[TRADES](feed=self.id,
+            await self.callback(TRADES, feed=self.id,
                                         pair=pair,
                                         side=BUY if side == 'b' else SELL,
                                         amount=Decimal(amount),
@@ -75,47 +74,49 @@ class Kraken(Feed):
         [93, {'a': ['105.85000', 0, '0.46100000'], 'b': ['105.77000', 45, '45.00000000'], 'c': ['105.83000', '5.00000000'], 'v': ['92170.25739498', '121658.17399954'], 'p': ['107.58276', '107.95234'], 't': [4966, 6717], 'l': ['105.03000', '105.03000'], 'h': ['110.33000', '110.33000'], 'o': ['109.45000', '106.78000']}]
         channel id, asks: price, wholeLotVol, vol, bids: price, wholeLotVol, close: ...,, vol: ..., VWAP: ..., trades: ..., low: ...., high: ..., open: ...
         """
-        await self.callbacks[TICKER](feed=self.id,
+        await self.callback(TICKER, feed=self.id,
                                      pair=pair,
                                      bid=Decimal(msg[1]['b'][0]),
                                      ask=Decimal(msg[1]['a'][0]))
 
-    async def _book(self, msg, pair):
+    async def _book(self, msg: dict, pair: str, timestamp: float):
         delta = {BID: [], ASK: []}
-        msg = msg[1]
-        if 'as' in msg:
+        msg = msg[1:-2]
+
+        if 'as' in msg[0]:
             # Snapshot
             self.l2_book[pair] = {BID: sd({
-                Decimal(update[0]): Decimal(update[1]) for update in msg['bs']
+                Decimal(update[0]): Decimal(update[1]) for update in msg[0]['bs']
             }), ASK: sd({
-                Decimal(update[0]): Decimal(update[1]) for update in msg['as']
+                Decimal(update[0]): Decimal(update[1]) for update in msg[0]['as']
             })}
-            await self.book_callback(pair, L2_BOOK, True, delta, time.time())
+            await self.book_callback(pair, L2_BOOK, True, delta, timestamp)
         else:
-            for s, updates in msg.items():
-                side = BID if s == 'b' else ASK
-                for update in updates:
-                    price, size, _ = update
-                    price = Decimal(price)
-                    size = Decimal(size)
-                    if size == 0:
-                        # Per Kraken's technical support
-                        # they deliver erroneous deletion messages
-                        # periodically which should be ignored
-                        if price in self.l2_book[pair][side]:
-                            del self.l2_book[pair][side][price]
-                            delta[side].append((price, 0))
-                    else:
-                        delta[side].append((price, size))
-                        self.l2_book[pair][side][price] = size
-                    if len(self.l2_book[pair][side]) > self.book_depth:
-                        del_price = self.l2_book[pair][side].items()[0 if side == BID else -1][0]
-                        del self.l2_book[pair][side][del_price]
-                        delta[side].append((del_price, 0))
+            for m in msg:
+                for s, updates in m.items():
+                    side = BID if s == 'b' else ASK
+                    for update in updates:
+                        price, size, *_ = update
+                        price = Decimal(price)
+                        size = Decimal(size)
+                        if size == 0:
+                            # Per Kraken's technical support
+                            # they deliver erroneous deletion messages
+                            # periodically which should be ignored
+                            if price in self.l2_book[pair][side]:
+                                del self.l2_book[pair][side][price]
+                                delta[side].append((price, 0))
+                        else:
+                            delta[side].append((price, size))
+                            self.l2_book[pair][side][price] = size
+            for side in (BID, ASK):
+                while len(self.l2_book[pair][side]) > self.book_depth:
+                    del_price = self.l2_book[pair][side].items()[0 if side == BID else -1][0]
+                    del self.l2_book[pair][side][del_price]
+                    delta[side].append((del_price, 0))
+            await self.book_callback(pair, L2_BOOK, False, delta, timestamp)
 
-            await self.book_callback(pair, L2_BOOK, False, delta, time.time())
-
-    async def message_handler(self, msg):
+    async def message_handler(self, msg: str, timestamp: float):
         msg = json.loads(msg, parse_float=Decimal)
 
         if isinstance(msg, list):
@@ -124,7 +125,7 @@ class Kraken(Feed):
             elif self.channel_map[msg[0]][0] == 'ticker':
                 await self._ticker(msg, self.channel_map[msg[0]][1])
             elif self.channel_map[msg[0]][0] == 'book':
-                await self._book(msg, self.channel_map[msg[0]][1])
+                await self._book(msg, self.channel_map[msg[0]][1], timestamp)
             else:
                 LOG.warning("%s: No mapping for message %s", self.id, msg)
         else:

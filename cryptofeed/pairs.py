@@ -9,7 +9,7 @@ Pair generation code for exchanges
 '''
 import requests
 
-from cryptofeed.defines import BITSTAMP, BITFINEX, COINBASE, GEMINI, HITBTC, POLONIEX, KRAKEN, BINANCE, EXX, HUOBI, OKCOIN, OKEX
+from cryptofeed.defines import BITSTAMP, BITFINEX, COINBASE, GEMINI, HITBTC, POLONIEX, KRAKEN, BINANCE, EXX, HUOBI, HUOBI_US, OKCOIN, OKEX, COINBENE, BYBIT
 
 
 def gen_pairs(exchange):
@@ -35,13 +35,17 @@ def bitfinex_pairs():
             continue
         else:
             normalized = pair[1:-3] + '-' + pair[-3:]
+            normalized = normalized.replace('UST', 'USDT')
             ret[normalized] = pair
+
     return ret
 
+def bybit_pairs():
+    pairs = {"BTC-USD": "BTCUSD", "ETH-USD": "ETHUSD", "EOS-USD": "EOSUSD", "XRP-USD": "XRPUSD"}
+    return pairs
 
 def coinbase_pairs():
     r = requests.get('https://api.pro.coinbase.com/products').json()
-
     return {data['id']: data['id'] for data in r}
 
 
@@ -106,6 +110,23 @@ def kraken_pairs():
     return ret
 
 
+def kraken_rest_pairs():
+    ret = {}
+    r = requests.get('https://api.kraken.com/0/public/AssetPairs')
+    data = r.json()
+    for pair in data['result']:
+        alt = data['result'][pair]['altname']
+        modifier = -3
+        if ".d" in alt:
+            modifier = -5
+        normalized = alt[:modifier] + '-' + alt[modifier:]
+        exch = normalized.replace("-", "")
+        normalized = normalized.replace('XBT', 'BTC')
+        normalized = normalized.replace('XDG', 'DOG')
+        ret[normalized] = exch
+    return ret
+
+
 def exx_pairs():
     r = requests.get('https://api.exx.com/data/v1/tickers').json()
 
@@ -115,19 +136,33 @@ def exx_pairs():
 
 
 def huobi_pairs():
+    r = requests.get('https://api.huobi.pro/v1/common/symbols').json()
+    return {'{}-{}'.format(e['base-currency'].upper(), e['quote-currency'].upper()) : '{}{}'.format(e['base-currency'], e['quote-currency']) for e in r['data']}
+
+
+def huobi_us_pairs():
     r = requests.get('https://api.huobi.com/v1/common/symbols').json()
     return {'{}-{}'.format(e['base-currency'].upper(), e['quote-currency'].upper()) : '{}{}'.format(e['base-currency'], e['quote-currency']) for e in r['data']}
 
 
 def okcoin_pairs():
     r = requests.get('https://www.okcoin.com/api/spot/v3/instruments').json()
-    return {e['product_id'] : e['product_id'] for e in r}
-
-def okex_pairs():
-    r = requests.get('https://www.okex.com/api/spot/v3/instruments').json()
     return {e['instrument_id'] : e['instrument_id'] for e in r}
 
 
+def okex_pairs():
+    r = requests.get('https://www.okex.com/api/spot/v3/instruments').json()
+    data = {e['instrument_id'] : e['instrument_id'] for e in r}
+    # swaps
+    r = requests.get('https://www.okex.com/api/swap/v3/instruments/ticker').json()
+    for update in r:
+        data[update['instrument_id']] = update['instrument_id']
+    return data
+
+
+def coinbene_pairs():
+    r = requests.get('http://api.coinbene.com/v1/market/symbol').json()
+    return {f"{e['baseAsset']}-{e['quoteAsset']}" : e['ticker'] for e in r['symbol']}
 
 _exchange_function_map = {
     BITFINEX: bitfinex_pairs,
@@ -137,9 +172,13 @@ _exchange_function_map = {
     POLONIEX: poloniex_pairs,
     BITSTAMP: bitstamp_pairs,
     KRAKEN: kraken_pairs,
+    KRAKEN+'REST': kraken_rest_pairs,
     BINANCE: binance_pairs,
     EXX: exx_pairs,
     HUOBI: huobi_pairs,
+    HUOBI_US: huobi_us_pairs,
     OKCOIN: okcoin_pairs,
-    OKEX: okex_pairs
+    OKEX: okex_pairs,
+    COINBENE: coinbene_pairs,
+    BYBIT: bybit_pairs,
 }

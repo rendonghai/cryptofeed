@@ -5,6 +5,7 @@ Please see the LICENSE file for the terms and conditions
 associated with this software.
 '''
 import json
+import re
 import logging
 from decimal import Decimal
 import zlib
@@ -13,7 +14,7 @@ from sortedcontainers import SortedDict as sd
 
 from cryptofeed.feed import Feed
 from cryptofeed.defines import TRADES, BUY, SELL, BID, ASK, TICKER, L2_BOOK, OKCOIN
-from cryptofeed.standards import pair_exchange_to_std
+from cryptofeed.standards import pair_exchange_to_std, timestamp_normalize
 
 
 LOG = logging.getLogger('feedhandler')
@@ -21,6 +22,7 @@ LOG = logging.getLogger('feedhandler')
 
 class OKCoin(Feed):
     id = OKCOIN
+    table_prefixs = ['spot']
 
     def __init__(self, pairs=None, channels=None, callbacks=None, **kwargs):
         super().__init__('wss://real.okcoin.com:10442/ws/v3', pairs=pairs, channels=channels, callbacks=callbacks, **kwargs)
@@ -50,7 +52,7 @@ class OKCoin(Feed):
         {'table': 'spot/ticker', 'data': [{'instrument_id': 'BTC-USD', 'last': '3977.74', 'best_bid': '3977.08', 'best_ask': '3978.73', 'open_24h': '3978.21', 'high_24h': '3995.43', 'low_24h': '3961.02', 'base_volume_24h': '248.245', 'quote_volume_24h': '988112.225861', 'timestamp': '2019-03-22T22:26:34.019Z'}]}
         """
         for update in msg['data']:
-            await self.callbacks[TICKER](feed=self.id,
+            await self.callback(TICKER, feed=self.id,
                                          pair=update['instrument_id'],
                                          bid=Decimal(update['best_bid']),
                                          ask=Decimal(update['best_ask']))
@@ -60,14 +62,14 @@ class OKCoin(Feed):
         {'table': 'spot/trade', 'data': [{'instrument_id': 'BTC-USD', 'price': '3977.44', 'side': 'buy', 'size': '0.0096', 'timestamp': '2019-03-22T22:45:44.578Z', 'trade_id': '486519521'}]}
         """
         for trade in msg['data']:
-            await self.callbacks[TRADES](
+            await self.callback(TRADES,
                 feed=self.id,
                 pair=pair_exchange_to_std(trade['instrument_id']),
                 order_id=trade['trade_id'],
                 side=BUY if trade['side'] == 'buy' else SELL,
                 amount=Decimal(trade['size']),
                 price=Decimal(trade['price']),
-                timestamp=trade['timestamp']
+                timestamp=timestamp_normalize(self.id, trade['timestamp'])
             )
 
     async def _book(self, msg):
@@ -77,13 +79,13 @@ class OKCoin(Feed):
                 pair = pair_exchange_to_std(update['instrument_id'])
                 self.l2_book[pair] = {
                     BID: sd({
-                        Decimal(price) : Decimal(amount) for price, amount, _ in update['bids']
+                        Decimal(price) : Decimal(amount) for price, amount, *_ in update['bids']
                     }),
                     ASK: sd({
-                        Decimal(price) : Decimal(amount) for price, amount, _ in update['asks']
+                        Decimal(price) : Decimal(amount) for price, amount, *_ in update['asks']
                     })
                 }
-                await self.book_callback(pair, L2_BOOK, True, None, update['timestamp'])
+                await self.book_callback(pair, L2_BOOK, True, None, timestamp_normalize(self.id, update['timestamp']))
         else:
             # update
             for update in msg['data']:
@@ -91,7 +93,7 @@ class OKCoin(Feed):
                 pair = pair_exchange_to_std(update['instrument_id'])
                 for side in ('bids', 'asks'):
                     s = BID if side == 'bids' else ASK
-                    for price, amount, _ in update[side]:
+                    for price, amount, *_ in update[side]:
                         price = Decimal(price)
                         amount = Decimal(amount)
                         if amount == 0:
@@ -100,9 +102,9 @@ class OKCoin(Feed):
                         else:
                             delta[s].append((price, amount))
                             self.l2_book[pair][s][price] = amount
-                await self.book_callback(pair, L2_BOOK, False, delta, update['timestamp'])
+                await self.book_callback(pair, L2_BOOK, False, delta, timestamp_normalize(self.id, update['timestamp']))
 
-    async def message_handler(self, msg):
+    async def message_handler(self, msg: str, timestamp: float):
         # DEFLATE compression, no header
         msg = zlib.decompress(msg, -15)
         msg = json.loads(msg, parse_float=Decimal)
@@ -115,11 +117,11 @@ class OKCoin(Feed):
             else:
                 LOG.warning("%s: Unhandled event %s", self.id, msg)
         elif 'table' in msg:
-            if msg['table'] == 'spot/ticker':
+            if re.match(f'^({"|".join(self.table_prefixs)})/ticker$', msg['table']):
                 await self._ticker(msg)
-            elif msg['table'] == 'spot/trade':
+            elif re.match(f'^({"|".join(self.table_prefixs)})/trade$', msg['table']):
                 await self._trade(msg)
-            elif msg['table'] == 'spot/depth':
+            elif re.match(f'^({"|".join(self.table_prefixs)})/depth$', msg['table']):
                 await self._book(msg)
             else:
                 LOG.warning("%s: Unhandled message %s", self.id, msg)

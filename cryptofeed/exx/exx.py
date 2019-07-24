@@ -121,14 +121,14 @@ class EXX(Feed):
 
         ['T', '1', '1547947390', 'BTC_USDT', 'bid', '3683.74440000', '0.082', '33732290']
         """
-        timestamp = msg[2]
+        timestamp = float(msg[2])
         pair = pair_exchange_to_std(msg[3])
         side = BUY if msg[4] == 'bid' else SELL
         price = Decimal(msg[5])
         amount = Decimal(msg[6])
         trade_id = msg[7]
 
-        await self.callbacks[TRADES](
+        await self.callback(TRADES,
             feed=self.id,
             pair=pair,
             order_id=trade_id,
@@ -138,7 +138,7 @@ class EXX(Feed):
             timestamp=timestamp
         )
 
-    async def message_handler(self, msg):
+    async def message_handler(self, msg: str, timestamp: float):
         msg = json.loads(msg, parse_float=Decimal)
 
         if isinstance(msg[0], list):
@@ -153,8 +153,8 @@ class EXX(Feed):
 
     async def subscribe(self, websocket):
         self.__reset()
-        for channel in self.channels:
-            for pair in self.pairs:
+        for channel in self.channels if not self.config else self.config:
+            for pair in self.pairs if not self.config else self.config[channel]:
                 await websocket.send(json.dumps({"dataType": f"1_{channel}_{pair}",
                                                  "dataSize": 50,
                                                  "action": "ADD"

@@ -11,8 +11,8 @@ from decimal import Decimal
 from sortedcontainers import SortedDict as sd
 
 from cryptofeed.feed import Feed
-from cryptofeed.defines import BUY, SELL, BID, ASK, TRADES, L2_BOOK, BITSTAMP
-from cryptofeed.standards import pair_exchange_to_std
+from cryptofeed.defines import BUY, SELL, BID, ASK, TRADES, L2_BOOK, L3_BOOK, BITSTAMP
+from cryptofeed.standards import pair_exchange_to_std, feed_to_exchange, timestamp_normalize
 
 
 LOG = logging.getLogger('feedhandler')
@@ -20,88 +20,107 @@ LOG = logging.getLogger('feedhandler')
 
 class Bitstamp(Feed):
     id = BITSTAMP
+    # API documentation: https://www.bitstamp.net/websocket/v2/
 
     def __init__(self, pairs=None, channels=None, callbacks=None, **kwargs):
         super().__init__(
-            'wss://ws.pusherapp.com/app/de504dc5763aeef9ff52?protocol=7&client=js&version=2.1.6&flash=false',
+            'wss://ws.bitstamp.net/',
             pairs=pairs,
             channels=channels,
             callbacks=callbacks,
             **kwargs
         )
 
-    async def _order_book(self, msg):
+    async def _l2_book(self, msg):
         data = msg['data']
         chan = msg['channel']
         timestamp = data['timestamp']
-        pair = None
-        if chan == 'order_book':
-            pair = 'BTC-USD'
-        else:
-            pair = pair_exchange_to_std(chan.split('_')[-1])
+        pair = pair_exchange_to_std(chan.split('_')[-1])
 
         book = {}
         for side in (BID, ASK):
             book[side] = sd({Decimal(price): Decimal(size) for price, size in data[side + 's']})
-        await self.callbacks[L2_BOOK](feed=self.id, pair=pair, book=book, timestamp=timestamp)
+        self.l2_book[pair] = book
+        await self.book_callback(pair=pair, book_type=L2_BOOK, forced=False, delta=False, timestamp=timestamp)
 
-    async def _trades(self, msg):
+    async def _l3_book(self, msg):
         data = msg['data']
         chan = msg['channel']
-        pair = None
-        if chan == 'live_trades':
-            pair = 'BTC-USD'
-        else:
-            pair = pair_exchange_to_std(chan.split('_')[-1])
+        timestamp = data['timestamp']
+        pair = pair_exchange_to_std(chan.split('_')[-1])
+
+        book = {BID: sd(), ASK: sd()}
+        for side in (BID, ASK):
+            for price, size, order_id in data[side + 's']:
+                price = Decimal(price)
+                size = Decimal(size)
+                book[side].get(price, sd())[order_id] = size
+        self.l3_book[pair] = book
+        await self.book_callback(pair=pair, book_type=L3_BOOK, forced=False, delta=False, timestamp=timestamp)
+
+    async def _trades(self, msg):
+        """
+		{'data':
+		 {
+		 'microtimestamp': '1562650233964229',      // Event time (micros)
+		 'amount': Decimal('0.014140160000000001'), // Quantity
+		 'buy_order_id': 3709484695,                // Buyer order ID
+		 'sell_order_id': 3709484799,               // Seller order ID
+		 'amount_str': '0.01414016',                // Quantity string
+		 'price_str': '12700.00',                   // Price string
+		 'timestamp': '1562650233',                 // Event time
+		 'price': Decimal('12700.0'),               // Price
+		 'type': 1,
+		 'id': 93215787
+		 },
+		 'event': 'trade',
+		 'channel': 'live_trades_btcusd'
+		}
+        """
+        data = msg['data']
+        chan = msg['channel']
+        pair = pair_exchange_to_std(chan.split('_')[-1])
 
         side = BUY if data['type'] == 0 else SELL
         amount = Decimal(data['amount'])
         price = Decimal(data['price'])
-        timestamp = data['timestamp']
+        timestamp = int(data['microtimestamp'])
         order_id = data['id']
-        await self.callbacks[TRADES](feed=self.id,
+        await self.callback(TRADES, feed=self.id,
                                      pair=pair,
                                      side=side,
                                      amount=amount,
                                      price=price,
-                                     timestamp=timestamp,
+                                     timestamp=timestamp_normalize(self.id, timestamp),
                                      order_id=order_id
                                      )
 
-    async def message_handler(self, msg):
-        # for some reason the internal parts of the message
-        # are formatted in such a way that it wont parse from
-        # string to json without stripping some extra quotes and
-        # slashes
-        msg = msg.replace("\\", '')
-        msg = msg.replace("\"{", "{")
-        msg = msg.replace("}\"", "}")
+    async def message_handler(self, msg: str, timestamp: float):
         msg = json.loads(msg, parse_float=Decimal)
-        if 'pusher' in msg['event']:
-            if msg['event'] == 'pusher:connection_established':
+        if 'bts' in msg['event']:
+            if msg['event'] == 'bts:connection_established':
                 pass
-            elif msg['event'] == 'pusher_internal:subscription_succeeded':
+            elif msg['event'] == 'bts:subscription_succeeded':
                 pass
             else:
-                LOG.warning("%s: Unexpected pusher message %s", self.id, msg)
+                LOG.warning("%s: Unexpected message %s", self.id, msg)
         elif msg['event'] == 'trade':
             await self._trades(msg)
         elif msg['event'] == 'data':
-            await self._order_book(msg)
+            if msg['channel'].startswith(feed_to_exchange(self.id, L2_BOOK)):
+                await self._l2_book(msg)
+            if msg['channel'].startswith(feed_to_exchange(self.id, L3_BOOK)):
+                await self._l3_book(msg)
         else:
             LOG.warning("%s: Invalid message type %s", self.id, msg)
 
     async def subscribe(self, websocket):
-        # if channel is order book we need to subscribe to the diff channel
-        # to get updates, hit the REST endpoint to get the current complete state,
-        # then process the updates from the diff channel, ignoring any updates that
-        # are pre-timestamp on the response from the REST endpoint
-        for channel in self.channels:
-            for pair in self.pairs:
+        for channel in self.channels if not self.config else self.config:
+            for pair in self.pairs if not self.config else self.config[channel]:
                 await websocket.send(
                     json.dumps({
-                        "event": "pusher:subscribe",
+                        "event": "bts:subscribe",
                         "data": {
-                            "channel": "{}_{}".format(channel, pair) if pair != 'btcusd' else channel
+                            "channel": "{}_{}".format(channel, pair)
                         }
                     }))

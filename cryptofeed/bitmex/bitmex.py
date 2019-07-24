@@ -8,13 +8,13 @@ import json
 import logging
 from collections import defaultdict
 from decimal import Decimal
-from datetime import datetime as dt
 
 import requests
 from sortedcontainers import SortedDict as sd
 
 from cryptofeed.feed import Feed
-from cryptofeed.defines import L2_BOOK, BUY, SELL, BID, ASK, TRADES, FUNDING, L3_BOOK, BITMEX
+from cryptofeed.defines import L2_BOOK, BUY, SELL, BID, ASK, TRADES, FUNDING, L3_BOOK, BITMEX, INSTRUMENT
+from cryptofeed.standards import timestamp_normalize
 
 
 LOG = logging.getLogger('feedhandler')
@@ -25,13 +25,17 @@ class Bitmex(Feed):
     api = 'https://www.bitmex.com/api/v1/'
 
     def __init__(self, pairs=None, channels=None, callbacks=None, **kwargs):
-        super().__init__('wss://www.bitmex.com/realtime', pairs=None, channels=channels, callbacks=callbacks, **kwargs)
+        super().__init__('wss://www.bitmex.com/realtime', pairs=pairs, channels=channels, callbacks=callbacks, **kwargs)
+
         active_pairs = self.get_active_symbols()
-        for pair in pairs:
+        if self.config:
+            pairs = list(self.config.values())
+            self.pairs = [pair for inner in pairs for pair in inner]
+
+        for pair in self.pairs:
             if not pair.startswith('.'):
                 if pair not in active_pairs:
                     raise ValueError("{} is not active on BitMEX".format(pair))
-        self.pairs = pairs
         self._reset()
 
     def _reset(self):
@@ -75,20 +79,19 @@ class Bitmex(Feed):
         }
         """
         for data in msg['data']:
-            await self.callbacks[TRADES](feed=self.id,
+            ts = timestamp_normalize(self.id, data['timestamp'])
+            await self.callback(TRADES, feed=self.id,
                                          pair=data['symbol'],
                                          side=BUY if data['side'] == 'Buy' else SELL,
                                          amount=Decimal(data['size']),
                                          price=Decimal(data['price']),
                                          order_id=data['trdMatchID'],
-                                         timestamp=data['timestamp'])
+                                         timestamp=ts)
 
-    async def _book(self, msg):
+    async def _book(self, msg: dict, timestamp: float):
         """
         the Full bitmex book
         """
-        timestamp = dt.utcnow()
-        timestamp = timestamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         pair = None
         delta = {BID: [], ASK: []}
         # if we reset the book, force a full update
@@ -153,8 +156,8 @@ class Bitmex(Feed):
         top 10 orders from each side
         """
         timestamp = msg['data'][0]['timestamp']
+        timestamp = timestamp_normalize(self.id, timestamp)
         pair = None
-
         for update in msg['data']:
             pair = update['symbol']
             self.l2_book[pair][BID] = sd({
@@ -166,7 +169,7 @@ class Bitmex(Feed):
                 for price, amount in update['asks']
             })
 
-        await self.callbacks[L2_BOOK](feed=self.id, pair=pair, book=self.l2_book[pair], timestamp=timestamp)
+        await self.callback(L2_BOOK, feed=self.id, pair=pair, book=self.l2_book[pair], timestamp=timestamp)
 
     async def _funding(self, msg):
         """
@@ -198,15 +201,25 @@ class Bitmex(Feed):
         }
         """
         for data in msg['data']:
-            await self.callbacks[FUNDING](feed=self.id,
+            ts = timestamp_normalize(self.id, data['timestamp'])
+            await self.callback(FUNDING, feed=self.id,
                                           pair=data['symbol'],
-                                          timestamp=data['timestamp'],
+                                          timestamp=ts,
                                           interval=data['fundingInterval'],
                                           rate=data['fundingRate'],
                                           rate_daily=data['fundingRateDaily']
                                           )
 
-    async def message_handler(self, msg):
+    async def _instrument(self, msg):
+        for data in msg['data']:
+            ts = timestamp_normalize(self.id, data['timestamp'])
+            data['timestamp'] = ts
+            await self.callback(INSTRUMENT, feed=self.id,
+                                            pair=data['symbol'],
+                                            **data
+                                            )
+
+    async def message_handler(self, msg: str, timestamp: float):
         msg = json.loads(msg, parse_float=Decimal)
         if 'info' in msg:
             LOG.info("%s - info message: %s", self.id, msg)
@@ -219,19 +232,21 @@ class Bitmex(Feed):
             if msg['table'] == 'trade':
                 await self._trade(msg)
             elif msg['table'] == 'orderBookL2':
-                await self._book(msg)
+                await self._book(msg, timestamp)
             elif msg['table'] == 'funding':
                 await self._funding(msg)
             elif msg['table'] == 'orderBook10':
                 await self._l2_book(msg)
+            elif msg['table'] == 'instrument':
+                await self._instrument(msg)
             else:
                 LOG.warning("%s: Unhandled message %s", self.id, msg)
 
     async def subscribe(self, websocket):
         self._reset()
         chans = []
-        for channel in self.channels:
-            for pair in self.pairs:
+        for channel in self.channels if not self.config else self.config:
+            for pair in self.pairs if not self.config else self.config[channel]:
                 chans.append("{}:{}".format(channel, pair))
 
         await websocket.send(json.dumps({"op": "subscribe",

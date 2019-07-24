@@ -9,14 +9,14 @@ Contains all code to normalize and standardize the differences
 between exchanges. These include trading pairs, timestamps, and
 data channel names
 '''
-from datetime import datetime as dt
-import calendar
 import logging
+import pandas as pd
 
-from cryptofeed.defines import (L2_BOOK, L3_BOOK, TRADES, TICKER, VOLUME, FUNDING, UNSUPPORTED, BITFINEX,
-                                POLONIEX, HITBTC, BITSTAMP, COINBASE, BITMEX, KRAKEN, BINANCE, EXX, HUOBI, OKCOIN,
-                                OKEX)
+from cryptofeed.defines import (L2_BOOK, L3_BOOK, TRADES, TICKER, VOLUME, FUNDING, UNSUPPORTED, BITFINEX, GEMINI,
+                                POLONIEX, HITBTC, BITSTAMP, COINBASE, BITMEX, KRAKEN, BINANCE, EXX, HUOBI, HUOBI_US, OKCOIN,
+                                OKEX, COINBENE, BYBIT, TRADES_SWAP, TICKER_SWAP, L2_BOOK_SWAP, LIMIT, MARKET, FILL_OR_KILL, IMMEDIATE_OR_CANCEL, MAKER_OR_CANCEL, DERIBIT, INSTRUMENT)
 from cryptofeed.pairs import gen_pairs
+from cryptofeed.exceptions import UnsupportedTradingPair, UnsupportedDataFeed, UnsupportedTradingOption
 
 
 LOG = logging.getLogger('feedhandler')
@@ -27,7 +27,7 @@ _exchange_to_std = {}
 
 
 def load_exchange_pair_mapping(exchange):
-    if exchange == BITMEX:
+    if exchange in {BITMEX, DERIBIT}:
         return
     mapping = gen_pairs(exchange)
     for std, exch in mapping.items():
@@ -39,39 +39,44 @@ def load_exchange_pair_mapping(exchange):
 
 
 def pair_std_to_exchange(pair, exchange):
+    # bitmex does its own validation of trading pairs dynamically
+    if exchange in {BITMEX, DERIBIT}:
+        return pair
     if pair in _std_trading_pairs:
         try:
             return _std_trading_pairs[pair][exchange]
         except KeyError:
-            raise KeyError("{} is not configured/availble for {}".format(
-                pair, exchange))
+            raise UnsupportedTradingPair(f'{pair} is not supported on {exchange}')
     else:
+        # Bitfinex supports funding pairs that are single currencies, prefixed with f
         if exchange == BITFINEX and '-' not in pair:
-            return "f{}".format(pair)
-        return None
+            return f"f{pair}"
+        raise UnsupportedTradingPair(f'{pair} is not supported on {exchange}')
 
 
 def pair_exchange_to_std(pair):
     if pair in _exchange_to_std:
         return _exchange_to_std[pair]
+    # Bitfinex funding currency
     if pair[0] == 'f':
         return pair[1:]
     return None
 
 
 def timestamp_normalize(exchange, ts):
-    if exchange == BITMEX or exchange == COINBASE:
-        ts = dt.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ")
-        return calendar.timegm(ts.utctimetuple())
-    elif exchange in  {HUOBI, BITFINEX}:
+    if exchange in {BITMEX, COINBASE, HITBTC, OKCOIN, OKEX, BYBIT}:
+        return pd.Timestamp(ts).timestamp()
+    elif exchange in  {HUOBI, HUOBI_US, BITFINEX, COINBENE, DERIBIT, BINANCE}:
         return ts / 1000.0
+    elif exchange in {BITSTAMP}:
+        return ts / 1000000.0
     return ts
 
 
 _feed_to_exchange_map = {
     L2_BOOK: {
         BITFINEX: 'book-P0-F0-100',
-        POLONIEX: UNSUPPORTED,
+        POLONIEX: L2_BOOK,
         HITBTC: 'subscribeOrderbook',
         COINBASE: 'level2',
         BITMEX: 'orderBook10',
@@ -80,13 +85,16 @@ _feed_to_exchange_map = {
         BINANCE: 'depth20',
         EXX: 'ENTRUST_ADD',
         HUOBI: 'depth.step0',
+        HUOBI_US: 'depth.step0',
         OKCOIN: 'spot/depth',
-        OKEX: 'spot/depth'
-
+        OKEX: 'spot/depth',
+        COINBENE: L2_BOOK,
+        DERIBIT: 'book',
+        BYBIT: 'order_book_25L1'
     },
     L3_BOOK: {
         BITFINEX: 'book-R0-F0-100',
-        BITSTAMP: UNSUPPORTED,
+        BITSTAMP: 'detail_order_book',
         HITBTC: UNSUPPORTED,
         COINBASE: 'full',
         BITMEX: 'orderBookL2',
@@ -95,22 +103,28 @@ _feed_to_exchange_map = {
         BINANCE: UNSUPPORTED,
         EXX: UNSUPPORTED,
         HUOBI: UNSUPPORTED,
+        HUOBI_US: UNSUPPORTED,
         OKCOIN: UNSUPPORTED,
-        OKEX: UNSUPPORTED
+        OKEX: UNSUPPORTED,
+        BYBIT: UNSUPPORTED
     },
     TRADES: {
-        POLONIEX: UNSUPPORTED,
+        POLONIEX: TRADES,
         HITBTC: 'subscribeTrades',
         BITSTAMP: 'live_trades',
         BITFINEX: 'trades',
         COINBASE: 'matches',
         BITMEX: 'trade',
         KRAKEN: 'trade',
-        BINANCE: 'trade',
+        BINANCE: 'aggTrade',
         EXX: 'TRADE',
         HUOBI: 'trade.detail',
+        HUOBI_US: 'trade.detail',
         OKCOIN: 'spot/trade',
-        OKEX: 'spot/trade'
+        OKEX: 'spot/trade',
+        COINBENE: TRADES,
+        DERIBIT: 'trades',
+        BYBIT:  'trade'
     },
     TICKER: {
         POLONIEX: 1002,
@@ -122,8 +136,12 @@ _feed_to_exchange_map = {
         KRAKEN: TICKER,
         BINANCE: 'ticker',
         HUOBI: UNSUPPORTED,
+        HUOBI_US: UNSUPPORTED,
         OKCOIN: 'spot/ticker',
-        OKEX: 'spot/ticker'
+        OKEX: 'spot/ticker',
+        COINBENE: TICKER,
+        DERIBIT: "ticker",
+        BYBIT: UNSUPPORTED
     },
     VOLUME: {
         POLONIEX: 1003
@@ -131,8 +149,66 @@ _feed_to_exchange_map = {
     FUNDING: {
         BITMEX: 'funding',
         BITFINEX: 'trades'
+    },
+    TRADES_SWAP: {
+        OKEX: 'swap/trade'
+    },
+    TICKER_SWAP: {
+        OKEX: 'swap/ticker'
+    },
+    L2_BOOK_SWAP: {
+        OKEX: 'swap/depth'
+    },
+    INSTRUMENT: {
+        BITMEX: 'instrument'
     }
 }
+
+
+_exchange_options = {
+    LIMIT: {
+        KRAKEN: 'limit',
+        GEMINI: 'exchange limit',
+        POLONIEX: 'limit',
+        COINBASE: 'limit'
+    },
+    MARKET: {
+        KRAKEN: 'market',
+        GEMINI: UNSUPPORTED,
+        POLONIEX: UNSUPPORTED,
+        COINBASE: 'market'
+    },
+    FILL_OR_KILL: {
+        GEMINI: 'fill-or-kill',
+        POLONIEX: 'fillOrKill',
+        COINBASE: {'time_in_force': 'FOK'},
+        KRAKEN: UNSUPPORTED
+    },
+    IMMEDIATE_OR_CANCEL: {
+        GEMINI: 'immediate-or-cancel',
+        POLONIEX: 'immediateOrCancel',
+        COINBASE: {'time_in_force': 'IOC'},
+        KRAKEN: UNSUPPORTED
+    },
+    MAKER_OR_CANCEL: {
+        GEMINI: 'maker-or-cancel',
+        POLONIEX: 'postOnly',
+        COINBASE: {'post_only': 1},
+        KRAKEN: 'post'
+    }
+}
+
+
+def normalize_trading_options(exchange, option):
+    if option not in _exchange_options:
+        raise UnsupportedTradingOption
+    if exchange not in _exchange_options[option]:
+        raise UnsupportedTradingOption
+
+    ret = _exchange_options[option][exchange]
+    if ret == UNSUPPORTED:
+        raise UnsupportedTradingOption
+    return ret
 
 
 def feed_to_exchange(exchange, feed):
@@ -142,6 +218,6 @@ def feed_to_exchange(exchange, feed):
 
     ret = _feed_to_exchange_map[feed][exchange]
     if ret == UNSUPPORTED:
-        LOG.error("{} is not supported on {}".format(feed, exchange))
-        raise ValueError("{} is not supported on {}".format(feed, exchange))
+        LOG.error(f"{feed} is not supported on {exchange}")
+        raise UnsupportedDataFeed(f"{feed} is not supported on {exchange}")
     return ret

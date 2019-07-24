@@ -62,7 +62,7 @@ class Gemini(Feed):
         price = Decimal(msg['price'])
         side = SELL if msg['makerSide'] == 'bid' else BUY
         amount = Decimal(msg['amount'])
-        await self.callbacks[TRADES](feed=self.id,
+        await self.callback(TRADES, feed=self.id,
                                      order_id=msg['tid'],
                                      pair=self.pair,
                                      side=side,
@@ -91,7 +91,7 @@ class Gemini(Feed):
         if forced:
             await self.book_callback(self.pair, L2_BOOK, True, None, timestamp)
 
-    async def message_handler(self, msg):
+    async def message_handler(self, msg: str, timestamp: float):
         msg = json.loads(msg, parse_float=Decimal)
         seq_no = msg['socket_sequence']
 

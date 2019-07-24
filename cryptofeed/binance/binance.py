@@ -7,13 +7,12 @@ associated with this software.
 import json
 import logging
 from decimal import Decimal
-import time
 
 from sortedcontainers import SortedDict as sd
 
 from cryptofeed.feed import Feed
 from cryptofeed.defines import TICKER, TRADES, BUY, SELL, BID, ASK, L2_BOOK, BINANCE
-from cryptofeed.standards import pair_exchange_to_std
+from cryptofeed.standards import pair_exchange_to_std, timestamp_normalize
 
 
 LOG = logging.getLogger('feedhandler')
@@ -29,8 +28,8 @@ class Binance(Feed):
 
     def __address(self):
         address = "wss://stream.binance.com:9443/stream?streams="
-        for chan in self.channels:
-            for pair in self.pairs:
+        for chan in self.channels if not self.config else self.config:
+            for pair in self.pairs if not self.config else self.config[chan]:
                 pair = pair.lower()
                 stream = f"{pair}@{chan}/"
                 address += stream
@@ -42,28 +41,28 @@ class Binance(Feed):
     async def _trade(self, msg):
         """
         {
-        "e": "trade",     // Event type
-        "E": 123456789,   // Event time
-        "s": "BNBBTC",    // Symbol
-        "t": 12345,       // Trade ID
-        "p": "0.001",     // Price
-        "q": "100",       // Quantity
-        "b": 88,          // Buyer order ID
-        "a": 50,          // Seller order ID
-        "T": 123456785,   // Trade time
-        "m": true,        // Is the buyer the market maker?
-        "M": true         // Ignore
+            "e": "aggTrade",  // Event type
+            "E": 123456789,   // Event time
+            "s": "BNBBTC",    // Symbol
+            "a": 12345,       // Aggregate trade ID
+            "p": "0.001",     // Price
+            "q": "100",       // Quantity
+            "f": 100,         // First trade ID
+            "l": 105,         // Last trade ID
+            "T": 123456785,   // Trade time
+            "m": true,        // Is the buyer the market maker?
+            "M": true         // Ignore
         }
         """
         price = Decimal(msg['p'])
         amount = Decimal(msg['q'])
-        await self.callbacks[TRADES](feed=self.id,
-                                     order_id=msg['t'],
+        await self.callback(TRADES, feed=self.id,
+                                     order_id=msg['a'],
                                      pair=pair_exchange_to_std(msg['s']),
                                      side=SELL if msg['m'] else BUY,
                                      amount=amount,
                                      price=price,
-                                     timestamp=msg['E'])
+                                     timestamp=timestamp_normalize(self.id, msg['E']))
 
     async def _ticker(self, msg):
         """
@@ -96,12 +95,12 @@ class Binance(Feed):
         pair = pair_exchange_to_std(msg['s'])
         bid = Decimal(msg['b'])
         ask = Decimal(msg['a'])
-        await self.callbacks[TICKER](feed=self.id,
+        await self.callback(TICKER, feed=self.id,
                                      pair=pair,
                                      bid=bid,
                                      ask=ask)
 
-    async def _book(self, msg, pair):
+    async def _book(self, msg: dict, pair: str, timestamp: float):
         """
         {
         "lastUpdateId": 160,  // Last update ID
@@ -126,9 +125,9 @@ class Binance(Feed):
             ASK: sd({Decimal(ask[0]): Decimal(ask[1]) for ask in msg['asks']})
         }
 
-        await self.callbacks[L2_BOOK](feed=self.id, pair=pair, book=self.l2_book, timestamp=time.time() * 1000)
+        await self.callback(L2_BOOK, feed=self.id, pair=pair, book=self.l2_book, timestamp=timestamp)
 
-    async def message_handler(self, msg):
+    async def message_handler(self, msg: str, timestamp: float):
         msg = json.loads(msg, parse_float=Decimal)
 
         # Combined stream events are wrapped as follows: {"stream":"<streamName>","data":<rawPayload>}
@@ -140,8 +139,8 @@ class Binance(Feed):
         pair = pair_exchange_to_std(pair.upper())
 
         if event == 'depth20':
-            await self._book(msg, pair)
-        elif msg['e'] == 'trade':
+            await self._book(msg, pair, timestamp)
+        elif msg['e'] == 'aggTrade':
             await self._trade(msg)
         elif msg['e'] == '24hrTicker':
             await self._ticker(msg)
